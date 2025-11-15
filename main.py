@@ -1,6 +1,8 @@
 import os
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+import requests
+from typing import Dict, Any
 
 app = FastAPI()
 
@@ -22,47 +24,72 @@ def hello():
 
 @app.get("/test")
 def test_database():
-    """Test endpoint to check if database is available and accessible"""
-    response = {
+    """Basic health endpoint"""
+    return {
         "backend": "✅ Running",
-        "database": "❌ Not Available",
-        "database_url": None,
-        "database_name": None,
-        "connection_status": "Not Connected",
-        "collections": []
+        "message": "OK"
     }
-    
+
+# -------- GitHub Stats Endpoint --------
+@app.get("/github/stats")
+def github_stats(username: str = Query(..., description="GitHub username to aggregate stats for")) -> Dict[str, Any]:
+    """
+    Aggregate public GitHub repository stats for a user.
+    Returns totals and simple achievements-like highlights.
+    """
     try:
-        # Try to import database module
-        from database import db
-        
-        if db is not None:
-            response["database"] = "✅ Available"
-            response["database_url"] = "✅ Configured"
-            response["database_name"] = db.name if hasattr(db, 'name') else "✅ Connected"
-            response["connection_status"] = "Connected"
-            
-            # Try to list collections to verify connectivity
-            try:
-                collections = db.list_collection_names()
-                response["collections"] = collections[:10]  # Show first 10 collections
-                response["database"] = "✅ Connected & Working"
-            except Exception as e:
-                response["database"] = f"⚠️  Connected but Error: {str(e)[:50]}"
-        else:
-            response["database"] = "⚠️  Available but not initialized"
-            
-    except ImportError:
-        response["database"] = "❌ Database module not found (run enable-database first)"
+        repos_url = f"https://api.github.com/users/{username}/repos?per_page=100&type=owner&sort=updated"
+        resp = requests.get(repos_url, timeout=10)
+        if resp.status_code == 404:
+            raise HTTPException(status_code=404, detail="GitHub user not found")
+        if resp.status_code != 200:
+            raise HTTPException(status_code=resp.status_code, detail="GitHub API error")
+        repos = resp.json()
+        total_stars = 0
+        total_forks = 0
+        languages: Dict[str, int] = {}
+        most_starred = None
+        most_starred_count = -1
+        popular_repos = []
+
+        for r in repos:
+            st = r.get("stargazers_count", 0)
+            fk = r.get("forks_count", 0)
+            lg = r.get("language") or "Other"
+            total_stars += st
+            total_forks += fk
+            languages[lg] = languages.get(lg, 0) + 1
+            if st > most_starred_count:
+                most_starred_count = st
+                most_starred = {
+                    "name": r.get("name"),
+                    "stars": st,
+                    "html_url": r.get("html_url")
+                }
+            popular_repos.append({
+                "name": r.get("name"),
+                "stars": st,
+                "forks": fk,
+                "html_url": r.get("html_url")
+            })
+
+        # sort popular repos by stars desc and take top 5
+        popular_repos.sort(key=lambda x: x.get("stars", 0), reverse=True)
+        popular_repos = popular_repos[:5]
+
+        return {
+            "username": username,
+            "repoCount": len(repos),
+            "totalStars": total_stars,
+            "totalForks": total_forks,
+            "topLanguages": languages,
+            "mostStarred": most_starred,
+            "topRepos": popular_repos
+        }
+    except requests.Timeout:
+        raise HTTPException(status_code=504, detail="GitHub API timeout")
     except Exception as e:
-        response["database"] = f"❌ Error: {str(e)[:50]}"
-    
-    # Check environment variables
-    import os
-    response["database_url"] = "✅ Set" if os.getenv("DATABASE_URL") else "❌ Not Set"
-    response["database_name"] = "✅ Set" if os.getenv("DATABASE_NAME") else "❌ Not Set"
-    
-    return response
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 if __name__ == "__main__":
